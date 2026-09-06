@@ -240,6 +240,68 @@ void Boids::copyBoidsToVBO(float *vbodptr_positions, float *vbodptr_velocities) 
 * stepSimulation *
 ******************/
 
+__device__ glm::vec3 rule1(int N, int iSelf, const glm::vec3 *pos) {
+  glm::vec3 self_pos = pos[iSelf];
+
+  // Calc avg neighbor position
+  int total = 0;
+  glm::vec3 avg_pos = glm::vec3(0.0f);
+  for(int t=0; t<N; t++) {
+    glm::vec3 other_pos = pos[t];
+    if (t != iSelf && glm::distance(self_pos, other_pos) < rule1Distance) {
+      avg_pos += pos[t];
+      total++;
+    }
+  }
+
+  // Edge case- no neighbors
+  if (total == 0) {
+    return glm::vec3(0.0f);
+  } 
+
+  // Avg and calc vel
+  avg_pos /= total;
+  return (avg_pos - self_pos) * rule1Scale;
+}
+
+__device__ glm::vec3 rule2(int N, int iSelf, const glm::vec3 *pos) {
+  glm::vec3 self_pos = pos[iSelf];
+
+  glm::vec3 total = glm::vec3(0.0f);
+  for (int t=0; t<N; t++) {
+    glm::vec3 other_pos = pos[t];
+    if (t != iSelf && glm::distance(self_pos, other_pos) < rule2Distance) {
+      total -= pos[t] - self_pos;
+    }
+  }
+
+  return total * rule2Scale;
+}
+
+__device__ glm::vec3 rule3(int N, int iSelf, const glm::vec3 *pos, const glm::vec3 *vel) {
+  glm::vec3 self_pos = pos[iSelf];
+
+  // Calc avg neighbor position
+  int total = 0;
+  glm::vec3 avg_vel = glm::vec3(0.0f);
+  for(int t=0; t<N; t++) {
+    glm::vec3 other_pos = pos[t];
+    if (t != iSelf && glm::distance(self_pos, other_pos) < rule3Distance) {
+      avg_vel += vel[t];
+      total++;
+    }
+  }
+
+  // Edge case- no neighbors
+  if (total == 0) {
+    return glm::vec3(0.0f);
+  } 
+
+  // Avg and calc vel
+  avg_vel /= total;
+  return avg_vel * rule3Scale;
+}
+
 /**
 * LOOK-1.2 You can use this as a helper for kernUpdateVelocityBruteForce.
 * __device__ code can be called from a __global__ context
@@ -248,9 +310,15 @@ void Boids::copyBoidsToVBO(float *vbodptr_positions, float *vbodptr_velocities) 
 */
 __device__ glm::vec3 computeVelocityChange(int N, int iSelf, const glm::vec3 *pos, const glm::vec3 *vel) {
   // Rule 1: boids fly towards their local perceived center of mass, which excludes themselves
+  glm::vec3 rule1vel = rule1(N, iSelf, pos);
+
   // Rule 2: boids try to stay a distance d away from each other
+  glm::vec3 rule2vel = rule2(N, iSelf, pos);
+
   // Rule 3: boids try to match the speed of surrounding boids
-  return glm::vec3(0.0f, 0.0f, 0.0f);
+  glm::vec3 rule3vel = rule3(N, iSelf, pos, vel);
+
+  return rule1vel + rule2vel + rule3vel;
 }
 
 /**
@@ -259,9 +327,22 @@ __device__ glm::vec3 computeVelocityChange(int N, int iSelf, const glm::vec3 *po
 */
 __global__ void kernUpdateVelocityBruteForce(int N, glm::vec3 *pos,
   glm::vec3 *vel1, glm::vec3 *vel2) {
+  int iSelf = blockDim.x * blockIdx.x + threadIdx.x;
+  if (iSelf >= N) {
+    return;
+  }
+  
   // Compute a new velocity based on pos and vel1
+  glm::vec3 new_vel = vel1[iSelf] + computeVelocityChange(N, iSelf, pos, vel1);
+
   // Clamp the speed
+  float speed = glm::length(new_vel);
+  if (speed > maxSpeed) {
+     new_vel = (new_vel / speed) * maxSpeed;
+  }
+
   // Record the new velocity into vel2. Question: why NOT vel1?
+  vel2[iSelf] = new_vel;
 }
 
 /**
@@ -365,7 +446,13 @@ __global__ void kernUpdateVelNeighborSearchCoherent(
 */
 void Boids::stepSimulationNaive(float dt) {
   // TODO-1.2 - use the kernels you wrote to step the simulation forward in time.
+  
+  dim3 fullBlocksPerGrid((numObjects + blockSize - 1) / blockSize);
+  kernUpdateVelocityBruteForce<<<fullBlocksPerGrid, blockSize>>>(numObjects, dev_pos, dev_vel1, dev_vel2);
+  kernUpdatePos<<<fullBlocksPerGrid, blockSize>>>(numObjects, dt, dev_pos, dev_vel2);
+
   // TODO-1.2 ping-pong the velocity buffers
+  std::swap(dev_vel1, dev_vel2);
 }
 
 void Boids::stepSimulationScatteredGrid(float dt) {
