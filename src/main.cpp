@@ -98,6 +98,7 @@ bool init(int argc, char **argv) {
     return false;
   }
   glfwMakeContextCurrent(window);
+  glfwSwapInterval(0); // disable vsync
   glfwSetKeyCallback(window, keyCallback);
   glfwSetCursorPosCallback(window, mousePositionCallback);
   glfwSetMouseButtonCallback(window, mouseButtonCallback);
