@@ -194,7 +194,7 @@ void Boids::initSimulation(int N) {
   checkCUDAErrorWithLine("cudaMalloc dev_particleArrayIndices failed!");
   cudaMalloc((void**)&dev_particleGridIndices, numObjects * sizeof(int));
   checkCUDAErrorWithLine("cudaMalloc dev_particleGridIndices failed!");
-  
+
   dev_thrust_particleArrayIndices = thrust::device_ptr<int>(dev_particleArrayIndices);
   dev_thrust_particleGridIndices = thrust::device_ptr<int>(dev_particleGridIndices);
 
@@ -275,15 +275,15 @@ __device__ glm::vec3 clampSpeed(glm::vec3 vel) {
 
 
 __device__ glm::vec3 rule1Naive(int N, int iSelf, const glm::vec3 *pos) {
-  glm::vec3 self_pos = pos[iSelf];
+  glm::vec3 selfPos = pos[iSelf];
 
   // Calc avg neighbor position
   int total = 0;
-  glm::vec3 avg_pos = glm::vec3(0.0f);
+  glm::vec3 avgPos = glm::vec3(0.0f);
   for(int t=0; t<N; t++) {
-    glm::vec3 other_pos = pos[t];
-    if (t != iSelf && glm::distance(self_pos, other_pos) < rule1Distance) {
-      avg_pos += pos[t];
+    glm::vec3 otherPos = pos[t];
+    if (t != iSelf && glm::distance(selfPos, otherPos) < rule1Distance) {
+      avgPos += pos[t];
       total++;
     }
   }
@@ -294,18 +294,18 @@ __device__ glm::vec3 rule1Naive(int N, int iSelf, const glm::vec3 *pos) {
   }
 
   // Avg and calc vel
-  avg_pos /= total;
-  return (avg_pos - self_pos) * rule1Scale;
+  avgPos /= total;
+  return (avgPos - selfPos) * rule1Scale;
 }
 
 __device__ glm::vec3 rule2Naive(int N, int iSelf, const glm::vec3 *pos) {
-  glm::vec3 self_pos = pos[iSelf];
+  glm::vec3 selfPos = pos[iSelf];
 
   glm::vec3 total = glm::vec3(0.0f);
   for (int t=0; t<N; t++) {
-    glm::vec3 other_pos = pos[t];
-    if (t != iSelf && glm::distance(self_pos, other_pos) < rule2Distance) {
-      total -= pos[t] - self_pos;
+    glm::vec3 otherPos = pos[t];
+    if (t != iSelf && glm::distance(selfPos, otherPos) < rule2Distance) {
+      total -= pos[t] - selfPos;
     }
   }
 
@@ -313,15 +313,15 @@ __device__ glm::vec3 rule2Naive(int N, int iSelf, const glm::vec3 *pos) {
 }
 
 __device__ glm::vec3 rule3Naive(int N, int iSelf, const glm::vec3 *pos, const glm::vec3 *vel) {
-  glm::vec3 self_pos = pos[iSelf];
+  glm::vec3 selfPos = pos[iSelf];
 
   // Calc avg neighbor position
   int total = 0;
-  glm::vec3 avg_vel = glm::vec3(0.0f);
+  glm::vec3 avgVel = glm::vec3(0.0f);
   for(int t=0; t<N; t++) {
-    glm::vec3 other_pos = pos[t];
-    if (t != iSelf && glm::distance(self_pos, other_pos) < rule3Distance) {
-      avg_vel += vel[t];
+    glm::vec3 otherPos = pos[t];
+    if (t != iSelf && glm::distance(selfPos, otherPos) < rule3Distance) {
+      avgVel += vel[t];
       total++;
     }
   }
@@ -332,8 +332,8 @@ __device__ glm::vec3 rule3Naive(int N, int iSelf, const glm::vec3 *pos, const gl
   }
 
   // Avg and calc vel
-  avg_vel /= total;
-  return avg_vel * rule3Scale;
+  avgVel /= total;
+  return avgVel * rule3Scale;
 }
 
 struct BoidRuleAccum {
@@ -410,12 +410,12 @@ __global__ void kernUpdateVelocityBruteForce(int N, glm::vec3 *pos,
   if (iSelf >= N) {
     return;
   }
-  
+
   // Compute a new velocity based on pos and vel1
-  glm::vec3 new_vel = vel1[iSelf] + computeVelocityChange(N, iSelf, pos, vel1);
+  glm::vec3 newVel = vel1[iSelf] + computeVelocityChange(N, iSelf, pos, vel1);
 
   // Record the new velocity into vel2. Question: why NOT vel1?
-  vel2[iSelf] = clampSpeed(new_vel);
+  vel2[iSelf] = clampSpeed(newVel);
 }
 
 /**
@@ -468,12 +468,12 @@ __global__ void kernComputeIndices(int N, int gridResolution,
     }
 
     // Relative position (removes worldspace offset)
-    glm::vec3 rel_pos = pos[iSelf] - gridMin;
+    glm::vec3 relPos = pos[iSelf] - gridMin;
 
     // Get cell index in each dimension
-    int cellX = int(rel_pos.x * inverseCellWidth);
-    int cellY = int(rel_pos.y * inverseCellWidth);
-    int cellZ = int(rel_pos.z * inverseCellWidth);
+    int cellX = int(relPos.x * inverseCellWidth);
+    int cellY = int(relPos.y * inverseCellWidth);
+    int cellZ = int(relPos.z * inverseCellWidth);
 
     // Convert to flat index
     int gridIndex = gridIndex3Dto1D(cellX, cellY, cellZ, gridResolution);
@@ -508,7 +508,7 @@ __global__ void kernIdentifyCellStartEnd(int N, int *particleGridIndices,
     // Check if start
     if (iSelf == 0 ) { // Boid 0 is always start
       gridCellStartIndices[particleGridIndices[iSelf]] = iSelf;
-    } 
+    }
     else if (particleGridIndices[iSelf - 1] != particleGridIndices[iSelf]) {
       gridCellStartIndices[particleGridIndices[iSelf]] = iSelf;
     }
@@ -516,7 +516,7 @@ __global__ void kernIdentifyCellStartEnd(int N, int *particleGridIndices,
     // Check if end
     if (iSelf == N - 1) { // Boid N-1 is always end
       gridCellEndIndices[particleGridIndices[iSelf]] = iSelf;
-    } 
+    }
     else if (particleGridIndices[iSelf] != particleGridIndices[iSelf + 1]) {
       gridCellEndIndices[particleGridIndices[iSelf]] = iSelf;
     }
@@ -580,7 +580,7 @@ __device__ void getAdjacentCells27(glm::vec3 relPos, float inverseCellWidth, int
 
         // Record adjacent index
         int adjIndex = gridIndex3Dto1D(x, y, z, gridResolution);
-        adjCells[gridIndex3Dto1D(i +1, j+1, k+1, 3)] = adjIndex;
+        adjCells[gridIndex3Dto1D(i + 1, j + 1, k + 1, 3)] = adjIndex;
       }
     }
   }
