@@ -51,9 +51,9 @@ void checkCUDAError(const char *msg, int line = -1) {
 
 // LOOK-1.2 Parameters for the boids algorithm.
 // These worked well in our reference implementation.
-#define rule1Distance 15.0f
-#define rule2Distance 5.0f
-#define rule3Distance 15.0f
+#define rule1Distance 20.0f
+#define rule2Distance 3.0f
+#define rule3Distance 20.0f
 
 #define rule1Scale 0.01f
 #define rule2Scale 0.1f
@@ -199,6 +199,7 @@ void Boids::initSimulation(int N) {
   cudaMalloc((void**)&dev_gridCellEndIndices, gridCellCount * sizeof(int));
   checkCUDAErrorWithLine("cudaMalloc dev_gridCellEndIndices failed!");
 
+
   cudaDeviceSynchronize();
 }
 
@@ -252,6 +253,15 @@ void Boids::copyBoidsToVBO(float *vbodptr_positions, float *vbodptr_velocities) 
 /******************
 * stepSimulation *
 ******************/
+
+__device__ glm::vec3 clampSpeed(glm::vec3 vel) {
+  float speed = glm::length(vel);
+  if (speed > maxSpeed) {
+     vel = (vel / speed) * maxSpeed;
+  }
+  return vel;
+}
+
 
 __device__ glm::vec3 rule1Naive(int N, int iSelf, const glm::vec3 *pos) {
   glm::vec3 self_pos = pos[iSelf];
@@ -315,24 +325,48 @@ __device__ glm::vec3 rule3Naive(int N, int iSelf, const glm::vec3 *pos, const gl
   return avg_vel * rule3Scale;
 }
 
-__device__ void rule1ScatteredGrid(const glm::vec3 &selfPos, const glm::vec3 &otherPos, glm::vec3 &centerAccum, int &totalAccum) {
+struct BoidRuleAccum {
+    glm::vec3 rule1center = glm::vec3(0.f);
+    glm::vec3 rule2center = glm::vec3(0.f);
+    glm::vec3 rule3avgVel = glm::vec3(0.f);
+    int rule1total = 0;
+    int rule3total = 0;
+};
+
+__device__ void rule1ScatteredGrid(const glm::vec3 &selfPos, const glm::vec3 &otherPos, BoidRuleAccum &boidRuleAccum) {
   if (glm::distance(selfPos, otherPos) < rule1Distance) {
-    centerAccum += otherPos;
-    totalAccum++;
+    boidRuleAccum.rule1center += otherPos;
+    boidRuleAccum.rule1total++;
   }
 }
 
-__device__ void rule2ScatteredGrid(const glm::vec3 &selfPos, const glm::vec3 &otherPos, glm::vec3 &totalAccum) {
+__device__ void rule2ScatteredGrid(const glm::vec3 &selfPos, const glm::vec3 &otherPos, BoidRuleAccum &boidRuleAccum) {
   if (glm::distance(selfPos, otherPos) < rule2Distance) {
-    totalAccum -= otherPos - selfPos;
+    boidRuleAccum.rule2center -= otherPos - selfPos;
   }
 }
 
-__device__ void rule3ScatteredGrid(const glm::vec3 &selfPos, const glm::vec3 &otherPos,
-  const glm::vec3 &otherVel, glm::vec3 &velAccum, int &totalAccum) {
+__device__ void rule3ScatteredGrid(const glm::vec3 &selfPos, const glm::vec3 &otherPos, const glm::vec3 &otherVel, BoidRuleAccum &boidRuleAccum) {
   if (glm::distance(selfPos, otherPos) < rule3Distance) {
-    velAccum += otherVel;
-    totalAccum++;
+    boidRuleAccum.rule3avgVel += otherVel;
+    boidRuleAccum.rule3total++;
+  }
+}
+
+__device__ void finalizeVelocity(const glm::vec3 &selfPos, glm::vec3 &selfVel, BoidRuleAccum &boidRuleAccum) {
+  // Finalize rule 1
+  if (boidRuleAccum.rule1total > 0) {
+    boidRuleAccum.rule1center /= boidRuleAccum.rule1total;
+    selfVel += (boidRuleAccum.rule1center - selfPos) * rule1Scale;
+  }
+
+  // Finalize rule 2
+  selfVel += boidRuleAccum.rule2center * rule2Scale;
+
+  // Finalize rule 3
+  if (boidRuleAccum.rule3total > 0) {
+    boidRuleAccum.rule3avgVel /= boidRuleAccum.rule3total;
+    selfVel += boidRuleAccum.rule3avgVel * rule3Scale;
   }
 }
 
@@ -369,14 +403,8 @@ __global__ void kernUpdateVelocityBruteForce(int N, glm::vec3 *pos,
   // Compute a new velocity based on pos and vel1
   glm::vec3 new_vel = vel1[iSelf] + computeVelocityChange(N, iSelf, pos, vel1);
 
-  // Clamp the speed
-  float speed = glm::length(new_vel);
-  if (speed > maxSpeed) {
-     new_vel = (new_vel / speed) * maxSpeed;
-  }
-
   // Record the new velocity into vel2. Question: why NOT vel1?
-  vel2[iSelf] = new_vel;
+  vel2[iSelf] = clampSpeed(new_vel);
 }
 
 /**
@@ -483,26 +511,22 @@ __global__ void kernIdentifyCellStartEnd(int N, int *particleGridIndices,
     }
 }
 
-__device__ void getAdjacentCells(glm::vec3 relPos, float inverseCellWidth, float cellWidth, int gridResolution, int *adjCells) {
+__device__ void getAdjacentCells8(glm::vec3 relPos, float inverseCellWidth, float cellWidth, int gridResolution, int *adjCells) {
   int cellX = int(relPos.x * inverseCellWidth);
   int cellY = int(relPos.y * inverseCellWidth);
   int cellZ = int(relPos.z * inverseCellWidth);
 
-  // Get local pos in cell (0,1)
-  float localX = relPos.x - cellX * cellWidth;
-  float localY = relPos.y - cellY * cellWidth;
-  float localZ = relPos.z - cellZ * cellWidth;
-
-  // Check if we round up or down
-  int xDir = (localX < cellWidth / 2.0f) ? -1 : 1;
-  int yDir = (localY < cellWidth / 2.0f) ? -1 : 1;
-  int zDir = (localZ < cellWidth / 2.0f) ? -1 : 1;
+  // Check if we round up or down in each dimension
+  int xDir = (relPos.x - cellX * cellWidth < cellWidth / 2.0f) ? -1 : 1;
+  int yDir = (relPos.y - cellY * cellWidth < cellWidth / 2.0f) ? -1 : 1;
+  int zDir = (relPos.z - cellZ * cellWidth < cellWidth / 2.0f) ? -1 : 1;
 
   // Check current + adjacent cell in each dimension
   int xCells[2] = {cellX, cellX + xDir};
   int yCells[2] = {cellY, cellY + yDir};
   int zCells[2] = {cellZ, cellZ + zDir};
 
+   // Check adjacent 8 cells
   for (int i=0; i<=1; i++) {
     for (int j=0; j<=1; j++) {
       for (int k=0; k<=1; k++) {
@@ -522,7 +546,42 @@ __device__ void getAdjacentCells(glm::vec3 relPos, float inverseCellWidth, float
       }
     }
   }
+}
 
+__device__ void getAdjacentCells27(glm::vec3 relPos, float inverseCellWidth, int gridResolution, int *adjCells) {
+  int cellX = int(relPos.x * inverseCellWidth);
+  int cellY = int(relPos.y * inverseCellWidth);
+  int cellZ = int(relPos.z * inverseCellWidth);
+  
+  // Check adjacent 27 cells
+  for (int i=-1; i<=1; i++) {
+    for (int j=-1; j<=1; j++) {
+      for (int k=-1; k<=1; k++) {
+        int x = cellX + i;
+        int y = cellY + j;
+        int z = cellZ + k;
+
+        // Skip if out of bounds
+        if (x < 0 || x >= gridResolution || 
+            y < 0 || y >= gridResolution || 
+            z < 0 || z >= gridResolution) 
+            continue;
+
+        // Record adjacent index
+        int adjIndex = gridIndex3Dto1D(x, y, z, gridResolution);
+        adjCells[gridIndex3Dto1D(i +1, j+1, k+1, 3)] = adjIndex;
+      }
+    }
+  }
+}
+
+// Fills adjCells (either 8 or 27 cells)
+__device__ void getAdjacentCells(glm::vec3 relPos, float inverseCellWidth, float cellWidth, int gridResolution, bool use27, int *adjCells) {
+  if (use27) {
+    getAdjacentCells27(relPos, inverseCellWidth, gridResolution, adjCells);
+    return;
+  }
+  getAdjacentCells8(relPos, inverseCellWidth, cellWidth, gridResolution, adjCells);
 }
 
 __global__ void kernUpdateVelNeighborSearchScattered(
@@ -549,32 +608,30 @@ __global__ void kernUpdateVelNeighborSearchScattered(
   // Get boid index (in pos/vel arrays)
   int boidIndex = particleArrayIndices[iSelf];
   glm::vec3 selfPos = pos[boidIndex];
+  glm::vec3 selfVel = vel1[boidIndex];
 
   // Get adjacent cells
-  int adjacentCellIndices[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
-  getAdjacentCells(selfPos - gridMin, inverseCellWidth, cellWidth, gridResolution, adjacentCellIndices);
+  const int MAX_ADJ_CELLS = 27;
+  int adjacentCellIndices[MAX_ADJ_CELLS];
+  for (int i=0; i<MAX_ADJ_CELLS; i++) {
+    adjacentCellIndices[i] = -1;
+  }
+  bool use27 = false; // Use either 27 or 8 adj cells
+  getAdjacentCells(selfPos - gridMin, inverseCellWidth, cellWidth, gridResolution, use27, adjacentCellIndices);
 
   // Init rules values
-  glm::vec3 rule1vel = glm::vec3(0.f);
-  glm::vec3 rule2vel = glm::vec3(0.f);
-  glm::vec3 rule3vel = glm::vec3(0.f);
-  glm::vec3 rule1center = glm::vec3(0.f);
-  glm::vec3 rule2center = glm::vec3(0.f);
-  glm::vec3 rule3avgVel = glm::vec3(0.f);
-  int rule1total = 0;
-  int rule3total = 0;
+  BoidRuleAccum boidRuleAccum;
 
   // Loop through adjacent cells
-  for (int i=0; i<8; i++) {
+  for (int i=0; i<MAX_ADJ_CELLS; i++) {
     int adjIndex = adjacentCellIndices[i];
-    if (adjIndex == -1) {
-      continue;
-    }
+    if (adjIndex == -1) continue;
 
-    // Iterate through cell boids
+    // Iterate through boids in each cell
     int cellStart = gridCellStartIndices[adjIndex];
     int cellEnd = gridCellEndIndices[adjIndex];
     for(int j=cellStart; j<=cellEnd; j++) {
+
       // Convert from sorted index -> original index
       int otherBoidIndex = particleArrayIndices[j];
       if (otherBoidIndex == boidIndex) continue;
@@ -582,38 +639,17 @@ __global__ void kernUpdateVelNeighborSearchScattered(
       glm::vec3 otherPos = pos[otherBoidIndex];
       glm::vec3 otherVel = vel1[otherBoidIndex];
 
-      rule1ScatteredGrid(selfPos, otherPos, rule1center, rule1total);
-      rule2ScatteredGrid(selfPos, otherPos, rule2center);
-      rule3ScatteredGrid(selfPos, otherPos, otherVel, rule3avgVel, rule3total);
+      rule1ScatteredGrid(selfPos, otherPos, boidRuleAccum);
+      rule2ScatteredGrid(selfPos, otherPos, boidRuleAccum);
+      rule3ScatteredGrid(selfPos, otherPos, otherVel, boidRuleAccum);
     }
   }
 
-  // Finalize rule 1
-  if (rule1total > 0) {
-    rule1center /= rule1total;
-    rule1vel = (rule1center - selfPos) * rule1Scale;
-  }
-
-  // Finalize rule 2
-  rule2vel = rule2center * rule2Scale;
-
-  // Finalize rule 3
-  if (rule3total > 0) {
-    rule3avgVel /= rule3total;
-    rule3vel = rule3avgVel * rule3Scale;
-  }
-
   // Compute new velocity
-  glm::vec3 new_vel = vel1[boidIndex] + rule1vel + rule2vel + rule3vel;
-
-  // Clamp the speed
-  float speed = glm::length(new_vel);
-  if (speed > maxSpeed) {
-     new_vel = (new_vel / speed) * maxSpeed;
-  }
+  finalizeVelocity(selfPos, selfVel, boidRuleAccum);
 
   // Record the new velocity into vel2
-  vel2[boidIndex] = new_vel;
+  vel2[boidIndex] = clampSpeed(selfVel);
 }
 
 __global__ void kernUpdateVelNeighborSearchCoherent(
