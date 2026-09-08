@@ -62,7 +62,7 @@ void checkCUDAError(const char *msg, int line = -1) {
 #define maxSpeed 1.0f
 
 /*! Size of the starting area in simulation space. */
-#define scene_scale 100.0f
+#define scene_scale 500.0f
 
 /***********************************************
 * Kernel state (pointers are device pointers) *
@@ -537,10 +537,11 @@ __device__ void getAdjacentCells8(glm::vec3 relPos, float inverseCellWidth, floa
   int yCells[2] = {cellY, cellY + yDir};
   int zCells[2] = {cellZ, cellZ + zDir};
 
-   // Check adjacent 8 cells
-  for (int i=0; i<=1; i++) {
+  // Check adjacent 8 cells
+  // NOTE- loop X innermost so X cells are adj in memory (then Y then Z)
+  for (int k=0; k<=1; k++) {
     for (int j=0; j<=1; j++) {
-      for (int k=0; k<=1; k++) {
+      for (int i=0; i<=1; i++) {
         int x = xCells[i];
         int y = yCells[j];
         int z = zCells[k];
@@ -565,9 +566,10 @@ __device__ void getAdjacentCells27(glm::vec3 relPos, float inverseCellWidth, int
   int cellZ = int(relPos.z * inverseCellWidth);
   
   // Check adjacent 27 cells
-  for (int i=-1; i<=1; i++) {
+  // NOTE- loop X innermost so X cells are adj in memory (then Y then Z)
+  for (int k=-1; k<=1; k++) {
     for (int j=-1; j<=1; j++) {
-      for (int k=-1; k<=1; k++) {
+      for (int i=-1; i<=1; i++) {
         int x = cellX + i;
         int y = cellY + j;
         int z = cellZ + k;
